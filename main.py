@@ -7,83 +7,7 @@ import os
 from flask import Flask
 from threading import Thread
 
-# --- ตั้งค่า Bot ---
-class MyBot(commands.Bot):
-    def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True  # สำคัญ: ต้องเปิดใน Developer Portal
-        intents.members = True          # สำหรับการจัดการสมาชิกและการส่ง DM
-        super().__init__(command_prefix="!", intents=intents)
-        self.antispam_enabled = False
-        self.user_messages = {} # {user_id: [timestamps]}
-        self.warn_count = {}   # {user_id: count}
-
-    async def setup_hook(self):
-        await self.tree.sync()
-        print(f"Synced Slash Commands เรียบร้อย!")
-
-bot = MyBot()
-
-# --- Slash Command: /เปิด ---
-@bot.tree.command(name="เปิด", description="เปิดระบบป้องกันสแปม")
-async def open_antispam(interaction: discord.Interaction):
-    bot.antispam_enabled = True
-    await interaction.response.send_message("🛡️ **ระบบป้องกันสแปม:** เปิดใช้งานแล้ว! (ตรวจจับ 5 ข้อความรัวๆ)")
-
-# --- ระบบตรวจจับข้อความ ---
-@bot.event
-async def on_message(message):
-    if not bot.antispam_enabled or message.author.bot or not message.guild:
-        return
-
-    user_id = message.author.id
-    now = datetime.datetime.now().timestamp()
-
-    # ตรวจสอบความถี่ข้อความ
-    if user_id not in bot.user_messages:
-        bot.user_messages[user_id] = []
-    
-    bot.user_messages[user_id].append(now)
-    # กรองเอาเฉพาะข้อความที่ส่งภายใน 5 วินาทีล่าสุด
-    bot.user_messages[user_id] = [t for t in bot.user_messages[user_id] if now - t < 5]
-
-    if len(bot.user_messages[user_id]) >= 5:
-        # 1. ลบข้อความสแปม
-        try:
-            await message.delete()
-        except:
-            pass
-
-        # 2. นับจำนวนการเตือน
-        count = bot.warn_count.get(user_id, 0) + 1
-        bot.warn_count[user_id] = count
-
-        if count >= 3:
-            # 3. ลงโทษ: หมดเวลา (Timeout) 5 นาที
-            duration = datetime.timedelta(minutes=5)
-            try:
-                await message.author.timeout(duration, reason="สแปมข้อความเกิน 3 ครั้ง")
-                
-                # 4. ส่ง DM หาคนสแปม
-                try:
-                    await message.author.send(f"⚠️ คุณถูกระงับการพิมพ์ในเซิร์ฟเวอร์ {message.guild.name} เป็นเวลา 5 นาที เนื่องจากสแปมข้อความ")
-                except:
-                    pass # กรณีปิด DM
-
-                # รีเซ็ตค่าหลังโดนลงโทษ
-                bot.warn_count[user_id] = 0
-                bot.user_messages[user_id] = []
-            except Exception as e:
-                print(f"Error: {e}")
-        else:
-            # 5. เตือนพร้อม Tag @
-            warning = await message.channel.send(f"⚠️ {message.author.mention} **หยุดสแปม!** เตือนครั้งที่ {count}/3 (ถ้าครบ 3 ครั้งจะโดน Timeout 5 นาที)")
-            await asyncio.sleep(3)
-            await warning.delete() # ลบคำเตือนทิ้งเพื่อไม่ให้แชทรกรุงรัง
-
-    await bot.process_commands(message)
-
-# --- ส่วนของ Render.com (Keep Alive) ---
+# ---------- ตั้งค่าระบบรันบนเว็บไซต์ (Render) ----------
 app = Flask('')
 @app.route('/')
 def home():
@@ -96,9 +20,194 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- เริ่มรันบอท ---
+# ---------- เริ่มต้นโค้ดบอทของแทน ----------
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+class MyBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=intents)
+        # ตัวแปรสำหรับระบบสแปม
+        self.antispam_enabled = False
+        self.user_messages = {} # {user_id: [timestamps]}
+        self.warn_count = {}   # {user_id: count}
+
+    async def setup_hook(self):
+        await self.tree.sync()
+        print(f"✅ Sync Slash Commands และเข้าระบบแล้วในชื่อ {self.user}")
+
+bot = MyBot()
+
+# เก็บค่าการตั้งค่าห้องต้อนรับ/ลาออก
+welcome_settings = {}
+
+# ---------- ระบบสแปม (เพิ่มเติม) ----------
+@bot.tree.command(name="เปิด", description="เปิดระบบป้องกันสแปม")
+async def open_antispam(interaction: discord.Interaction):
+    bot.antispam_enabled = True
+    await interaction.response.send_message("🛡️ **ระบบป้องกันสแปม:** เปิดใช้งานแล้ว! (5 ข้อความรัวๆ / เตือน 3 ครั้ง / Timeout 5 นาที)")
+
+@bot.event
+async def on_message(message):
+    # ตรวจสอบระบบสแปมก่อน
+    if bot.antispam_enabled and not message.author.bot and message.guild:
+        user_id = message.author.id
+        now = datetime.datetime.now().timestamp()
+
+        if user_id not in bot.user_messages:
+            bot.user_messages[user_id] = []
+        
+        bot.user_messages[user_id].append(now)
+        bot.user_messages[user_id] = [t for t in bot.user_messages[user_id] if now - t < 5]
+
+        if len(bot.user_messages[user_id]) >= 5:
+            try:
+                await message.delete()
+            except:
+                pass
+
+            count = bot.warn_count.get(user_id, 0) + 1
+            bot.warn_count[user_id] = count
+
+            if count >= 3:
+                duration = datetime.timedelta(minutes=5)
+                try:
+                    await message.author.timeout(duration, reason="สแปมข้อความเกินกำหนด")
+                    try:
+                        await message.author.send(f"⚠️ คุณถูกระงับการพิมพ์ในเซิร์ฟเวอร์ {message.guild.name} เป็นเวลา 5 นาที เนื่องจากสแปม")
+                    except:
+                        pass
+                    bot.warn_count[user_id] = 0
+                    bot.user_messages[user_id] = []
+                except:
+                    pass
+            else:
+                warning = await message.channel.send(f"⚠️ {message.author.mention} **หยุดสแปม!** เตือนครั้งที่ {count}/3")
+                await asyncio.sleep(3)
+                await warning.delete()
+
+    # รันคำสั่ง Prefix ปกติของแทน (ถ้ามี)
+    await bot.process_commands(message)
+
+# ---------- 1. ระบบรายงานปัญหา (โค้ดเดิมของแทน) ----------
+class ReportModal(discord.ui.Modal, title="รายงานปัญหาในเซิร์ฟเวอร์"):
+    problem = discord.ui.TextInput(label="พิมพ์ปัญหาของคุณที่นี่", style=discord.TextStyle.long)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        owner = interaction.guild.owner
+        try:
+            await owner.send(f"📢 **มีรายงานใหม่จาก {interaction.user}**\n```{self.problem.value}```")
+            embed = discord.Embed(title="✅ รายงานสำเร็จ!", description="ระบบได้ส่งข้อความไปหาเจ้าของเซิร์ฟแล้ว", color=discord.Color.green())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            embed = discord.Embed(title="❌ ส่งไม่สำเร็จ", description="ไม่สามารถส่ง DM ไปหาเจ้าของเซิร์ฟได้", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+class ReportButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    @discord.ui.button(label="📩 รายงานปัญหา", style=discord.ButtonStyle.danger)
+    async def report(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ReportModal())
+
+@bot.tree.command(name="report", description="ตั้ง UI รายงานปัญหาในห้องที่เลือก")
+async def report_command(interaction: discord.Interaction, channel: discord.TextChannel):
+    await channel.send("📣 หากพบปัญหาในเซิร์ฟเวอร์ กดปุ่มด้านล่างเพื่อรายงาน", view=ReportButton())
+    await interaction.response.send_message("✅ ตั้ง UI รายงานปัญหาเรียบร้อย!", ephemeral=True)
+
+# ---------- 2. ระบบยืนยันตัวตน (โค้ดเดิมของแทน) ----------
+class VerifyModal(discord.ui.Modal, title="ยืนยันตัวตน"):
+    name = discord.ui.TextInput(label="กรอกชื่อของคุณ", style=discord.TextStyle.short)
+    def __init__(self, verify_channel, success_channel, role):
+        super().__init__()
+        self.verify_channel = verify_channel
+        self.success_channel = success_channel
+        self.role = role
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        user = interaction.user
+        try:
+            await self.success_channel.send(f"✅ {user.mention} ยืนยันตัวตนสำเร็จ! (ชื่อ: {self.name.value})")
+            if self.role:
+                await user.add_roles(self.role)
+            embed = discord.Embed(title="🎉 ยืนยันตัวตนเรียบร้อย!", description=f"ขอบคุณ {user.mention}", color=discord.Color.green())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ บอทไม่มีสิทธิ์ให้ยศ กรุณาตรวจสอบสิทธิ์ใน Server Settings → Roles", ephemeral=True)
+
+class VerifyButton(discord.ui.View):
+    def __init__(self, verify_channel, success_channel, role):
+        super().__init__(timeout=None)
+        self.verify_channel = verify_channel
+        self.success_channel = success_channel
+        self.role = role
+    @discord.ui.button(label="✅ ยืนยันตัวตน", style=discord.ButtonStyle.success)
+    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VerifyModal(self.verify_channel, self.success_channel, self.role))
+
+@bot.tree.command(name="verify", description="ตั้งระบบยืนยันตัวตน")
+async def verify_command(interaction: discord.Interaction, verify_channel: discord.TextChannel, success_channel: discord.TextChannel, role: discord.Role):
+    await verify_channel.send("👤 กดยืนยันตัวตนด้านล่างเพื่อเริ่ม", view=VerifyButton(verify_channel, success_channel, role))
+    await interaction.response.send_message("✅ ตั้งระบบยืนยันตัวตนเรียบร้อย!", ephemeral=True)
+
+# ---------- 3. ส่งข้อความไปยังห้อง (โค้ดเดิมของแทน) ----------
+@bot.tree.command(name="send_message", description="ส่งข้อความไปยังห้องที่เลือก")
+async def send_message(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
+    await channel.send(message)
+    await interaction.response.send_message("✅ ส่งข้อความเรียบร้อย!", ephemeral=True)
+
+# ---------- 4. ส่ง DM ทุกคน (โค้ดเดิมของแทน) ----------
+@bot.tree.command(name="dm_all", description="ส่ง DM ไปหาทุกคนในเซิร์ฟเวอร์")
+async def dm_all(interaction: discord.Interaction, message: str):
+    await interaction.response.send_message("📨 กำลังส่ง DM ...", ephemeral=True)
+    count = 0
+    async for member in interaction.guild.fetch_members(limit=None):
+        if not member.bot:
+            try:
+                await member.send(message)
+                count += 1
+            except:
+                pass
+    await interaction.followup.send(f"✅ ส่งข้อความถึง {count} คนแล้ว!", ephemeral=True)
+
+# ---------- 5. ส่ง DM หนึ่งคน (โค้ดเดิมของแทน) ----------
+@bot.tree.command(name="dm_one", description="ส่ง DM ไปหาสมาชิกที่เลือก")
+async def dm_one(interaction: discord.Interaction, member: discord.Member, message: str):
+    try:
+        await member.send(message)
+        await interaction.response.send_message(f"✅ ส่งข้อความถึง {member} แล้ว!", ephemeral=True)
+    except:
+        await interaction.response.send_message("❌ ไม่สามารถส่งข้อความได้ (ปิด DM)", ephemeral=True)
+
+# ---------- 6. ตั้งค่าห้องแจ้งคนเข้า/ออก (โค้ดเดิมของแทน) ----------
+@bot.tree.command(name="setup_welcome", description="ตั้งค่าห้องแจ้งคนเข้าออก")
+async def setup_welcome(interaction: discord.Interaction, join_channel: discord.TextChannel, leave_channel: discord.TextChannel):
+    welcome_settings[interaction.guild.id] = {"join": join_channel.id, "leave": leave_channel.id}
+    await interaction.response.send_message("✅ ตั้งค่าห้องแจ้งคนเข้าออกเรียบร้อย!", ephemeral=True)
+
+@bot.event
+async def on_member_join(member):
+    data = welcome_settings.get(member.guild.id)
+    if data:
+        ch = member.guild.get_channel(data["join"])
+        if ch: await ch.send(f"👋 ยินดีต้อนรับ {member.mention} เข้าสู่เซิร์ฟเวอร์!")
+
+@bot.event
+async def on_member_remove(member):
+    data = welcome_settings.get(member.guild.id)
+    if data:
+        ch = member.guild.get_channel(data["leave"])
+        if ch: await ch.send(f"😢 {member} ได้ออกจากเซิร์ฟเวอร์แล้ว")
+
+# ---------- เริ่มรันระบบ ----------
 if __name__ == "__main__":
     keep_alive()
-    token = os.environ.get('TOKEN') # ใส่ Token ใน Environment Variable ของ Render
-    bot.run(token)
-              
+    # ดึง Token จาก Environment Variable ของ Render
+    token = os.environ.get('TOKEN')
+    if token:
+        bot.run(token)
+    else:
+        print("❌ ไม่พบ TOKEN ใน Environment Variables!")
