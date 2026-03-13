@@ -90,6 +90,53 @@ async def on_message(message):
     # รันคำสั่ง Prefix ปกติของแทน (ถ้ามี)
     await bot.process_commands(message)
 
+# ---------- ระบบโดเนท (เพิ่มเติม) ----------
+class DonateModal(discord.ui.Modal, title="ส่งซองของขวัญสนับสนุน"):
+    link = discord.ui.TextInput(label="ลิงก์ซองทรูมันนี่ (10บ. ขึ้นไป)", placeholder="https://gift.truemoney.com/...")
+    money = discord.ui.TextInput(label="จำนวนเงิน", placeholder="ระบุจำนวนเงิน")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            if int(self.money.value) < 10:
+                return await interaction.response.send_message("❌ ขั้นต่ำ 10 บาทครับ", ephemeral=True)
+        except: 
+            return await interaction.response.send_message("❌ ใส่ตัวเลขเท่านั้น", ephemeral=True)
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        emb = discord.Embed(title="💰 มีรายการโดเนทใหม่!", color=discord.Color.gold())
+        emb.add_field(name="จากคุณ", value=interaction.user.mention)
+        emb.add_field(name="จำนวนเงิน", value=f"{self.money.value} บาท")
+        emb.add_field(name="ลิงก์ซองของขวัญ", value=self.link.value)
+        emb.set_footer(text="แอดมินท่านใดเห็นก่อนสามารถกดรับได้เลยครับ")
+
+        admin_count = 0
+        for member in interaction.guild.members:
+            if member.guild_permissions.administrator and not member.bot:
+                try:
+                    await member.send(embed=emb)
+                    admin_count += 1
+                except:
+                    pass
+        
+        await interaction.followup.send(f"✅ ส่งลิงก์โดเนทให้ทีมแอดมิน ({admin_count} ท่าน) เรียบร้อยแล้ว!", ephemeral=True)
+
+class DonateView(discord.ui.View):
+    def __init__(self): 
+        super().__init__(timeout=None)
+    @discord.ui.button(label="💸 โดเนทสนับสนุน", style=discord.ButtonStyle.success, emoji="💰")
+    async def donate_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DonateModal())
+
+@bot.tree.command(name="setup_donate", description="ตั้งค่าระบบโดเนท")
+@app_commands.describe(channel="ห้องที่จะส่ง", title="หัวข้อ", description="คำอธิบาย", image_url="ลิงก์รูปภาพ")
+async def setup_donate(interaction: discord.Interaction, channel: discord.TextChannel, title: str, description: str, image_url: str):
+    emb = discord.Embed(title=title, description=description, color=discord.Color.blue())
+    if image_url.startswith("http"): 
+        emb.set_image(url=image_url)
+    await channel.send(embed=emb, view=DonateView())
+    await interaction.response.send_message("✅ ติดตั้งระบบโดเนทเรียบร้อย", ephemeral=True)
+
 # ---------- 1. ระบบรายงานปัญหา (โค้ดเดิมของแทน) ----------
 class ReportModal(discord.ui.Modal, title="รายงานปัญหาในเซิร์ฟเวอร์"):
     problem = discord.ui.TextInput(label="พิมพ์ปัญหาของคุณที่นี่", style=discord.TextStyle.long)
@@ -205,7 +252,6 @@ async def on_member_remove(member):
 # ---------- เริ่มรันระบบ ----------
 if __name__ == "__main__":
     keep_alive()
-    # ดึง Token จาก Environment Variable ของ Render
     token = os.environ.get('TOKEN')
     if token:
         bot.run(token)
