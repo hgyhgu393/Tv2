@@ -22,8 +22,9 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# ---------- ระบบ AI Pattara (เพิ่มเติม) ----------
-api_key = "AIzaSyACNbFYvFYLzRFqddR2i6Z79DoythmgczE"
+# ---------- ระบบ AI Pattara (ปรับปรุงการดึง API Key) ----------
+# แก้ไข: ดึง API Key จาก Environment Variable ชื่อ GEMINI_API_KEY
+api_key = os.environ.get('GEMINI_API_KEY')
 genai.configure(api_key=api_key)
 
 def get_ai_response(prompt):
@@ -236,7 +237,7 @@ async def verify_command(interaction: discord.Interaction, verify_channel: disco
 @bot.tree.command(name="send_message")
 async def send_message(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
     await channel.send(message)
-    await interaction.response.send_message("✅", ephemeral=True)
+    await interaction.response.send_message("✅ ส่งข้อความเรียบร้อย!", ephemeral=True)
 
 @bot.tree.command(name="dm_all")
 async def dm_all(interaction: discord.Interaction, message: str):
