@@ -5,7 +5,8 @@ import asyncio
 import datetime
 import os
 import random
-import google.generativeai as genai
+# แก้ไขระบบ AI เป็นตัวใหม่ตามที่ Google บังคับ
+from google import genai 
 from flask import Flask
 from threading import Thread
 
@@ -22,26 +23,32 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# ---------- ระบบ AI Pattara (ปรับปรุงการดึง API Key) ----------
-# แก้ไข: ดึง API Key จาก Environment Variable ชื่อ GEMINI_API_KEY
-api_key = os.environ.get('GEMINI_API_KEY')
-genai.configure(api_key=api_key)
-
+# ---------- ระบบ AI Pattara (ปรับปรุงเป็น SDK 2.0) ----------
 def get_ai_response(prompt):
+    api_key = os.environ.get('GEMINI_API_KEY')
+    if not api_key:
+        return "❌ ยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน Environment ของ Render นะวัยรุ่น!"
+
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        # กำหนดบุคลิกและเงื่อนไขตามที่สั่ง
+        # ใช้โครงสร้าง Client แบบใหม่ของ google-genai
+        client = genai.Client(api_key=api_key)
+        
         instruction = (
             "คุณชื่อ Pattara สร้างโดย mnbvxx เท่านั้น "
             "ห้ามบอกว่า Google สร้าง และห้ามพูดชื่อ Gemini "
             "ถ้ามีคนถามว่าชื่ออะไรหรือใครสร้าง ให้ตอบตามข้อมูลนี้เท่านั้น "
             "ให้ตอบเป็นภาษาไทยที่เป็นกันเอง กวนๆ เล็กน้อย และดูฉลาด"
         )
-        response = model.generate_content(f"{instruction}\nคำถามจากผู้ใช้: {prompt}")
+        
+        # เรียกใช้โมเดลผ่านระบบใหม่
+        response = client.models.generate_content(
+            model="gemini-2.0-flash", # อัปเกรดเป็นตัวล่าสุดที่แรงกว่าเดิม
+            contents=f"{instruction}\nคำถามจากผู้ใช้: {prompt}"
+        )
         return response.text
     except Exception as e:
         print(f"AI Error: {e}")
-        return "ขอโทษที สมอง Pattara บวมน้ำ (API Error) ลองใหม่อีกทีนะวัยรุ่น"
+        return "ขอโทษที สมอง Pattara รุ่นใหม่กำลังปรับจูน (API Error) ลองใหม่อีกทีนะวัยรุ่น"
 
 # ---------- เริ่มต้นโค้ดบอทของแทน ----------
 intents = discord.Intents.default()
