@@ -1,285 +1,154 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
-import asyncio
-import datetime
+from discord.ext import commands, tasks
 import os
-import random
-# แก้ไขระบบ AI เป็นตัวใหม่ตามที่ Google บังคับ
-from google import genai 
+import re
+import datetime
+import asyncio
+import pytchat
 from flask import Flask
 from threading import Thread
 
-# ---------- ตั้งค่าระบบรันบนเว็บไซต์ (Render) ----------
+# ---------- ระบบ Web Server สำหรับ Keep Alive ----------
 app = Flask('')
 @app.route('/')
-def home():
-    return "Bot is running!"
+def home(): return "YouTube Scanner is running."
+def run(): app.run(host='0.0.0.0', port=8080)
+def keep_alive(): Thread(target=run).start()
 
-def run():
-    app.run(host='0.0.0.0', port=8080)
+# ---------- ระบบจัดเก็บข้อมูล ----------
+# monitors: { video_id: { "user_id": int, "prefix": str, "title": str, "status": "green"/"red", "task": pytchat_obj } }
+monitors = {}
+sent_codes = set()
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-# ---------- ระบบ AI Pattara (ปรับปรุงเป็น SDK 2.0) ----------
-def get_ai_response(prompt):
-    api_key = os.environ.get('GEMINI_API_KEY')
-    if not api_key:
-        return "❌ ยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน Environment ของ Render นะวัยรุ่น!"
-
-    try:
-        # ใช้โครงสร้าง Client แบบใหม่ของ google-genai
-        client = genai.Client(api_key=api_key)
-        
-        instruction = (
-            "คุณชื่อ Pattara สร้างโดย mnbvxx เท่านั้น "
-            "ห้ามบอกว่า Google สร้าง และห้ามพูดชื่อ Gemini "
-            "ถ้ามีคนถามว่าชื่ออะไรหรือใครสร้าง ให้ตอบตามข้อมูลนี้เท่านั้น "
-            "ให้ตอบเป็นภาษาไทยที่เป็นกันเอง กวนๆ เล็กน้อย และดูฉลาด"
-        )
-        
-        # เรียกใช้โมเดลผ่านระบบใหม่
-        response = client.models.generate_content(
-            model="gemini-2.0-flash", # อัปเกรดเป็นตัวล่าสุดที่แรงกว่าเดิม
-            contents=f"{instruction}\nคำถามจากผู้ใช้: {prompt}"
-        )
-        return response.text
-    except Exception as e:
-        print(f"AI Error: {e}")
-        return "ขอโทษที สมอง Pattara รุ่นใหม่กำลังปรับจูน (API Error) ลองใหม่อีกทีนะวัยรุ่น"
-
-# ---------- เริ่มต้นโค้ดบอทของแทน ----------
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-
-class MyBot(commands.Bot):
+class YouTubeLiveBot(commands.Bot):
     def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
-        # ตัวแปรสำหรับระบบสแปม
-        self.antispam_enabled = False
-        self.user_messages = {} # {user_id: [timestamps]}
-        self.warn_count = {}   # {user_id: count}
-        # ตัวแปรสำหรับระบบ AI
-        self.ai_channel_id = None
 
     async def setup_hook(self):
         await self.tree.sync()
-        print(f"✅ Sync Slash Commands และเข้าระบบแล้วในชื่อ {self.user}")
+        self.check_chat_loop.start() # เริ่มระบบวนลูปอ่านแชท
+        print(f"Logged in as {self.user}")
 
-bot = MyBot()
+bot = YouTubeLiveBot()
 
-# เก็บค่าการตั้งค่าห้องต้อนรับ/ลาออก
-welcome_settings = {}
-
-# ---------- ระบบ AI Pattara (คำสั่งตั้งค่าห้อง) ----------
-@bot.tree.command(name="set_ai_channel", description="เลือกห้องที่ต้องการให้ Pattara คุยกับผู้ใช้")
-@app_commands.describe(channel="เลือกห้องแชท")
-async def set_ai_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    bot.ai_channel_id = channel.id
-    await interaction.response.send_message(f"✅ ตั้งค่าห้อง {channel.mention} ให้ Pattara ประจำการเรียบร้อย!", ephemeral=True)
-
-# ---------- ระบบสแปม & ระบบตรวจสอบข้อความ AI ----------
-@bot.tree.command(name="เปิด", description="เปิดระบบป้องกันสแปม")
-async def open_antispam(interaction: discord.Interaction):
-    bot.antispam_enabled = True
-    await interaction.response.send_message("🛡️ **ระบบป้องกันสแปม:** เปิดใช้งานแล้ว! (5 ข้อความรัวๆ / เตือน 3 ครั้ง / Timeout 5 นาที)")
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    # 1. ตรวจสอบระบบสแปมก่อน
-    if bot.antispam_enabled and message.guild:
-        user_id = message.author.id
-        now = datetime.datetime.now().timestamp()
-
-        if user_id not in bot.user_messages:
-            bot.user_messages[user_id] = []
-        
-        bot.user_messages[user_id].append(now)
-        bot.user_messages[user_id] = [t for t in bot.user_messages[user_id] if now - t < 5]
-
-        if len(bot.user_messages[user_id]) >= 5:
-            try: await message.delete()
-            except: pass
-
-            count = bot.warn_count.get(user_id, 0) + 1
-            bot.warn_count[user_id] = count
-
-            if count >= 3:
-                duration = datetime.timedelta(minutes=5)
-                try:
-                    await message.author.timeout(duration, reason="สแปมข้อความเกินกำหนด")
-                    bot.warn_count[user_id] = 0
-                except: pass
-            else:
-                warning = await message.channel.send(f"⚠️ {message.author.mention} **หยุดสแปม!** เตือนครั้งที่ {count}/3")
-                await asyncio.sleep(3)
-                await warning.delete()
-            return # ถ้าสแปม จะไม่ทำงานต่อในส่วน AI
-
-    # 2. ระบบคุยกับ AI Pattara (ทำงานเฉพาะห้องที่ตั้งค่าไว้)
-    if bot.ai_channel_id and message.channel.id == bot.ai_channel_id:
-        thinking_texts = [
-            f"**{message.author.display_name}** กำลังคิดปิ้ง Error (หยอกๆ)...",
-            "Pattara กำลังแคะขี้หูรอคำตอบแป๊บนึงนะ...",
-            "กำลังใช้สมองส่วนที่เหลืออยู่น้อยนิดคิดให้คุณอยู่...",
-            "รอหน่อยนะ mnbvxx บอกให้ผมตั้งใจคิด...",
-            "กำลังปั่นจักรยานไปหาคำตอบจากดาวอังคารมาให้...",
-            "ใจเย็นๆ นะวัยรุ่น Pattara กำลังวอร์มเครื่อง...",
-            "คำถามนี้ทำเอา Pattara ค้างไป 2 วิ กำลังประมวลผล..."
-        ]
-        
-        # ส่งข้อความ "กำลังคิด" แบบสุ่ม
-        tmp_msg = await message.reply(random.choice(thinking_texts))
-        
-        # ดึงคำตอบจาก AI (ใช้ thread เพื่อไม่ให้บอทค้าง)
-        loop = asyncio.get_event_loop()
-        answer = await loop.run_in_executor(None, get_ai_response, message.content)
-        
-        # แก้ไขข้อความเป็นคำตอบจริง
-        await tmp_msg.edit(content=answer)
-
-    # รันคำสั่ง Prefix ปกติ
-    await bot.process_commands(message)
-
-# ---------- ระบบโดเนท (เดิม) ----------
-class DonateModal(discord.ui.Modal, title="ส่งซองของขวัญสนับสนุน"):
-    link = discord.ui.TextInput(label="ลิงก์ซองทรูมันนี่ (10บ. ขึ้นไป)", placeholder="https://gift.truemoney.com/...")
-    money = discord.ui.TextInput(label="จำนวนเงิน", placeholder="ระบุจำนวนเงิน")
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            if int(self.money.value) < 10:
-                return await interaction.response.send_message("❌ ขั้นต่ำ 10 บาทครับ", ephemeral=True)
-        except: 
-            return await interaction.response.send_message("❌ ใส่ตัวเลขเท่านั้น", ephemeral=True)
-        
-        await interaction.response.defer(ephemeral=True)
-        emb = discord.Embed(title="💰 มีรายการโดเนทใหม่!", color=discord.Color.gold())
-        emb.add_field(name="จากคุณ", value=interaction.user.mention)
-        emb.add_field(name="จำนวนเงิน", value=f"{self.money.value} บาท")
-        emb.add_field(name="ลิงก์ซองของขวัญ", value=self.link.value)
-        emb.set_footer(text="แอดมินท่านใดเห็นก่อนสามารถกดรับได้เลยครับ")
-
-        admin_count = 0
-        for member in interaction.guild.members:
-            if member.guild_permissions.administrator and not member.bot:
-                try:
-                    await member.send(embed=emb)
-                    admin_count += 1
-                except: pass
-        
-        await interaction.followup.send(f"✅ ส่งลิงก์โดเนทให้ทีมแอดมิน ({admin_count} ท่าน) เรียบร้อยแล้ว!", ephemeral=True)
-
-class DonateView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="💸 โดเนทสนับสนุน", style=discord.ButtonStyle.success, emoji="💰")
-    async def donate_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(DonateModal())
-
-@bot.tree.command(name="setup_donate", description="ตั้งค่าระบบโดเนท")
-async def setup_donate(interaction: discord.Interaction, channel: discord.TextChannel, title: str, description: str, image_url: str):
-    emb = discord.Embed(title=title, description=description, color=discord.Color.blue())
-    if image_url.startswith("http"): emb.set_image(url=image_url)
-    await channel.send(embed=emb, view=DonateView())
-    await interaction.response.send_message("✅ ติดตั้งระบบโดเนทเรียบร้อย", ephemeral=True)
-
-# ---------- 1. ระบบรายงานปัญหา (เดิม) ----------
-class ReportModal(discord.ui.Modal, title="รายงานปัญหาในเซิร์ฟเวอร์"):
-    problem = discord.ui.TextInput(label="พิมพ์ปัญหาของคุณที่นี่", style=discord.TextStyle.long)
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        owner = interaction.guild.owner
-        try:
-            await owner.send(f"📢 **มีรายงานใหม่จาก {interaction.user}**\n```{self.problem.value}```")
-            await interaction.followup.send("✅ รายงานสำเร็จ!", ephemeral=True)
-        except: await interaction.followup.send("❌ ส่งไม่สำเร็จ", ephemeral=True)
-
-class ReportButton(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="📩 รายงานปัญหา", style=discord.ButtonStyle.danger)
-    async def report(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ReportModal())
-
-@bot.tree.command(name="report", description="ตั้ง UI รายงานปัญหา")
-async def report_command(interaction: discord.Interaction, channel: discord.TextChannel):
-    await channel.send("📣 หากพบปัญหาในเซิร์ฟเวอร์ กดปุ่มด้านล่างเพื่อรายงาน", view=ReportButton())
-    await interaction.response.send_message("✅ ตั้ง UI รายงานปัญหาเรียบร้อย!", ephemeral=True)
-
-# ---------- 2. ระบบยืนยันตัวตน (เดิม) ----------
-class VerifyModal(discord.ui.Modal, title="ยืนยันตัวตน"):
-    name = discord.ui.TextInput(label="กรอกชื่อของคุณ", style=discord.TextStyle.short)
-    def __init__(self, verify_channel, success_channel, role):
-        super().__init__()
-        self.verify_channel = verify_channel
-        self.success_channel = success_channel
-        self.role = role
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            await self.success_channel.send(f"✅ {interaction.user.mention} ยืนยันตัวตนสำเร็จ! (ชื่อ: {self.name.value})")
-            if self.role: await interaction.user.add_roles(self.role)
-            await interaction.followup.send("🎉 ยืนยันตัวตนเรียบร้อย!", ephemeral=True)
-        except: await interaction.followup.send("❌ บอทไม่มีสิทธิ์ให้ยศ", ephemeral=True)
-
-class VerifyButton(discord.ui.View):
-    def __init__(self, vc, sc, role):
+# ---------- ระบบ UI และปุ่มกด ----------
+class ControlPanelView(discord.ui.View):
+    def __init__(self, log_channel_id):
         super().__init__(timeout=None)
-        self.vc = vc; self.sc = sc; self.role = role
-    @discord.ui.button(label="✅ ยืนยันตัวตน", style=discord.ButtonStyle.success)
-    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(VerifyModal(self.vc, self.sc, self.role))
+        self.log_channel_id = log_channel_id
 
-@bot.tree.command(name="verify", description="ตั้งระบบยืนยันตัวตน")
-async def verify_command(interaction: discord.Interaction, verify_channel: discord.TextChannel, success_channel: discord.TextChannel, role: discord.Role):
-    await verify_channel.send("👤 กดยืนยันตัวตนด้านล่างเพื่อเริ่ม", view=VerifyButton(verify_channel, success_channel, role))
-    await interaction.response.send_message("✅ ตั้งระบบยืนยันตัวตนเรียบร้อย!", ephemeral=True)
+    @discord.ui.button(label="เพิ่มลิ้งค์การดู", style=discord.ButtonStyle.success, emoji="➕")
+    async def add_link(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddLinkModal(self.log_channel_id))
 
-# ---------- ระบบพื้นฐานอื่นๆ (เดิม) ----------
-@bot.tree.command(name="send_message")
-async def send_message(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
-    await channel.send(message)
-    await interaction.response.send_message("✅ ส่งข้อความเรียบร้อย!", ephemeral=True)
+    @discord.ui.button(label="ลบลิ้งค์การดู", style=discord.ButtonStyle.danger, emoji="➖")
+    async def remove_link(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not monitors:
+            return await interaction.response.send_message("❌ ไม่มีลิ้งค์ที่กำลังดูอยู่", ephemeral=True)
+        monitors.clear()
+        await interaction.response.send_message("🗑️ ลบรายการเฝ้าดูทั้งหมดเรียบร้อยแล้ว", ephemeral=True)
 
-@bot.tree.command(name="dm_all")
-async def dm_all(interaction: discord.Interaction, message: str):
-    await interaction.response.send_message("📨 ส่ง DM...", ephemeral=True)
-    count = 0
-    async for m in interaction.guild.fetch_members(limit=None):
-        if not m.bot:
-            try: await m.send(message); count += 1
-            except: pass
-    await interaction.followup.send(f"✅ {count} คน", ephemeral=True)
+    @discord.ui.button(label="สถานะการดูของบอท", style=discord.ButtonStyle.secondary, emoji="📊")
+    async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not monitors:
+            return await interaction.response.send_message("⚪ สถานะ: ว่างงาน", ephemeral=True)
+        
+        embed = discord.Embed(title="📊 สถานะการเฝ้าดูปัจจุบัน", color=discord.Color.blue())
+        for vid, data in monitors.items():
+            emoji = "🟢" if data['status'] == "green" else "🔴"
+            embed.add_field(name=f"{emoji} {data['title']}", value=f"Video ID: `{vid}` | Prefix: `{data['prefix']}`", inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="setup_welcome")
-async def setup_welcome(interaction: discord.Interaction, join_channel: discord.TextChannel, leave_channel: discord.TextChannel):
-    welcome_settings[interaction.guild.id] = {"join": join_channel.id, "leave": leave_channel.id}
-    await interaction.response.send_message("✅", ephemeral=True)
+class AddLinkModal(discord.ui.Modal, title="เพิ่มลิ้งค์ YouTube Live"):
+    yt_url = discord.ui.TextInput(label="YouTube Live URL", placeholder="วางลิ้งค์ที่นี่...")
+    prefix = discord.ui.TextInput(label="คำนำหน้าโค้ด (เช่น RPL)", placeholder="RPL", min_length=2)
 
-@bot.event
-async def on_member_join(member):
-    data = welcome_settings.get(member.guild.id)
-    if data:
-        ch = member.guild.get_channel(data["join"])
-        if ch: await ch.send(f"👋 ยินดีต้อนรับ {member.mention}!")
+    def __init__(self, log_channel_id):
+        super().__init__()
+        self.log_channel_id = log_channel_id
 
-@bot.event
-async def on_member_remove(member):
-    data = welcome_settings.get(member.guild.id)
-    if data:
-        ch = member.guild.get_channel(data["leave"])
-        if ch: await ch.send(f"😢 {member} ออกจากเซิร์ฟเวอร์แล้ว")
+    async def on_submit(self, interaction: discord.Interaction):
+        video_id_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", self.yt_url.value)
+        if not video_id_match:
+            return await interaction.response.send_message("❌ ลิ้งค์ไม่ถูกต้อง", ephemeral=True)
+        
+        video_id = video_id_match.group(1)
+        try:
+            # ใช้ pytchat เพื่อดึงชื่อวิดีโอและตรวจสอบว่าไลฟ์อยู่ไหม
+            chat = pytchat.create(video_id=video_id)
+            if chat.is_alive():
+                monitors[video_id] = {
+                    "user_id": interaction.user.id,
+                    "prefix": self.prefix.value.upper(),
+                    "title": "กำลังดึงข้อมูล...",
+                    "status": "green",
+                    "log_channel": self.log_channel_id,
+                    "chat_obj": chat
+                }
+                await interaction.response.send_message(f"✅ เริ่มเฝ้าดู Video ID: `{video_id}` เรียบร้อย!", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ วิดีโอนี้ไม่ใช่ไลฟ์สดที่กำลังฉายอยู่", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ เกิดข้อผิดพลาด: {str(e)}", ephemeral=True)
 
-# ---------- เริ่มรันระบบ ----------
+# ---------- ระบบดึงแชท Real-time (Background Task) ----------
+@tasks.loop(seconds=1) # วนลูปอ่านแชททุกวินาที
+async def check_chat_loop(self):
+    for vid, data in list(monitors.items()):
+        try:
+            chat = data['chat_obj']
+            if chat.is_alive():
+                for c in chat.get().sync_items():
+                    msg = c.message
+                    prefix = data['prefix']
+                    
+                    # ค้นหาโค้ดที่มี Prefix นำหน้า
+                    pattern = rf"{prefix}[A-Z0-9]+"
+                    match = re.search(pattern, msg.upper())
+                    
+                    if match:
+                        code = match.group(0)
+                        if code not in sent_codes:
+                            user = await bot.fetch_user(data['user_id'])
+                            await self.send_code_dm(user, code, data['title'])
+                            sent_codes.add(code)
+                
+                monitors[vid]['status'] = "green"
+            else:
+                # ถ้าไลฟ์จบแล้ว
+                monitors[vid]['status'] = "red"
+        except Exception as e:
+            monitors[vid]['status'] = "red"
+            user = await bot.fetch_user(data['user_id'])
+            await self.send_error_dm(user, str(e))
+
+async def send_code_dm(self, user, code, title):
+    embed = discord.Embed(title="🚀 ตรวจพบโค้ด ROV!", color=0xFFD700, timestamp=datetime.datetime.now())
+    embed.add_field(name="📌 รหัส (แตะเพื่อคัดลอก)", value=f"`{code}`", inline=False)
+    embed.set_footer(text=f"จากไลฟ์: {title}")
+    try: await user.send(embed=embed)
+    except: pass
+
+async def send_error_dm(self, error_msg):
+    embed = discord.Embed(title="⚠️ แจ้งเตือนข้อผิดพลาด (Error)", description=f"```{error_msg}```", color=discord.Color.red())
+    try: await user.send(embed=embed)
+    except: pass
+
+# ---------- คำสั่งติดตั้งหลัก ----------
+@bot.tree.command(name="setup_monitor", description="สร้างระบบเฝ้าดู YouTube Live แบบ Real-time")
+async def setup_monitor(interaction: discord.Interaction, title: str, message: str, image_url: str, channel: discord.TextChannel):
+    embed = discord.Embed(title=title, description=message, color=discord.Color.blue())
+    if image_url: embed.set_image(url=image_url)
+    
+    view = ControlPanelView(log_channel_id=channel.id)
+    await interaction.response.send_message("✅ ติดตั้ง UI เรียบร้อยแล้ว", ephemeral=True)
+    await interaction.channel.send(embed=embed, view=view)
+
+# ---------- รันบอท ----------
 if __name__ == "__main__":
     keep_alive()
-    token = os.environ.get('TOKEN')
-    if token:
-        bot.run(token)
-    else:
-        print("❌ ไม่พบ TOKEN!")
+    bot.run(os.environ.get('DISCORD_TOKEN'))
