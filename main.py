@@ -151,4 +151,4 @@ async def setup_monitor(interaction: discord.Interaction, title: str, message: s
 # ---------- รันบอท ----------
 if __name__ == "__main__":
     keep_alive()
-    bot.run(os.environ.get('DISCORD_TOKEN'))
+    bot.run(os.environ.get('TOKEN'))
