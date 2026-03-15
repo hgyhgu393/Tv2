@@ -17,7 +17,6 @@ def run(): app.run(host='0.0.0.0', port=8080)
 def keep_alive(): Thread(target=run).start()
 
 # ---------- ระบบจัดเก็บข้อมูล ----------
-# monitors: { video_id: { "user_id": int, "prefix": str, "title": str, "status": "green"/"red", "task": pytchat_obj } }
 monitors = {}
 sent_codes = set()
 
@@ -29,12 +28,82 @@ class YouTubeLiveBot(commands.Bot):
 
     async def setup_hook(self):
         await self.tree.sync()
-        self.check_chat_loop.start() # เริ่มระบบวนลูปอ่านแชท
-        print(f"Logged in as {self.user}")
+        self.check_chat_loop.start() # เริ่มวนลูปที่อยู่ใน Class นี้
+        print(f"✅ บอทออนไลน์แล้วในชื่อ: {self.user}")
+
+    # ---------- ระบบดึงแชท Real-time (ต้องอยู่ใน Class) ----------
+    @tasks.loop(seconds=1)
+    async def check_chat_loop(self):
+        for vid, data in list(monitors.items()):
+            try:
+                chat = data['chat_obj']
+                if chat.is_alive():
+                    for c in chat.get().sync_items():
+                        msg = c.message
+                        prefix = data['prefix']
+                        
+                        pattern = rf"{prefix}[A-Z0-9]+"
+                        match = re.search(pattern, msg.upper())
+                        
+                        if match:
+                            code = match.group(0)
+                            if code not in sent_codes:
+                                user = await self.fetch_user(data['user_id'])
+                                await self.send_code_dm(user, code, data['title'])
+                                sent_codes.add(code)
+                    monitors[vid]['status'] = "green"
+                else:
+                    monitors[vid]['status'] = "red"
+            except Exception as e:
+                monitors[vid]['status'] = "red"
+                print(f"Error in loop: {e}")
+
+    async def send_code_dm(self, user, code, title):
+        embed = discord.Embed(title="🚀 ตรวจพบโค้ด ROV!", color=0xFFD700, timestamp=datetime.datetime.now())
+        embed.add_field(name="📌 รหัส (แตะเพื่อคัดลอก)", value=f"`{code}`", inline=False)
+        embed.set_footer(text=f"จากไลฟ์: {title}")
+        try: await user.send(embed=embed)
+        except: pass
+
+    async def send_error_dm(self, user, error_msg):
+        embed = discord.Embed(title="⚠️ แจ้งเตือนข้อผิดพลาด (Error)", description=f"```{error_msg}```", color=discord.Color.red())
+        try: await user.send(embed=embed)
+        except: pass
 
 bot = YouTubeLiveBot()
 
 # ---------- ระบบ UI และปุ่มกด ----------
+class AddLinkModal(discord.ui.Modal, title="เพิ่มลิ้งค์ YouTube Live"):
+    yt_url = discord.ui.TextInput(label="YouTube Live URL", placeholder="วางลิ้งค์ที่นี่...")
+    prefix = discord.ui.TextInput(label="คำนำหน้าโค้ด (เช่น RPL)", placeholder="RPL", min_length=2)
+
+    def __init__(self, log_channel_id):
+        super().__init__()
+        self.log_channel_id = log_channel_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        video_id_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", self.yt_url.value)
+        if not video_id_match:
+            return await interaction.response.send_message("❌ ลิ้งค์ไม่ถูกต้อง", ephemeral=True)
+        
+        video_id = video_id_match.group(1)
+        try:
+            chat = pytchat.create(video_id=video_id)
+            if chat.is_alive():
+                monitors[video_id] = {
+                    "user_id": interaction.user.id,
+                    "prefix": self.prefix.value.upper(),
+                    "title": "YouTube Live Content",
+                    "status": "green",
+                    "log_channel": self.log_channel_id,
+                    "chat_obj": chat
+                }
+                await interaction.response.send_message(f"✅ เริ่มเฝ้าดู Video ID: `{video_id}` เรียบร้อย!", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ วิดีโอนี้ไม่ใช่ไลฟ์สดที่กำลังฉายอยู่", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ เกิดข้อผิดพลาด: {str(e)}", ephemeral=True)
+
 class ControlPanelView(discord.ui.View):
     def __init__(self, log_channel_id):
         super().__init__(timeout=None)
@@ -63,81 +132,6 @@ class ControlPanelView(discord.ui.View):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-class AddLinkModal(discord.ui.Modal, title="เพิ่มลิ้งค์ YouTube Live"):
-    yt_url = discord.ui.TextInput(label="YouTube Live URL", placeholder="วางลิ้งค์ที่นี่...")
-    prefix = discord.ui.TextInput(label="คำนำหน้าโค้ด (เช่น RPL)", placeholder="RPL", min_length=2)
-
-    def __init__(self, log_channel_id):
-        super().__init__()
-        self.log_channel_id = log_channel_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        video_id_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", self.yt_url.value)
-        if not video_id_match:
-            return await interaction.response.send_message("❌ ลิ้งค์ไม่ถูกต้อง", ephemeral=True)
-        
-        video_id = video_id_match.group(1)
-        try:
-            # ใช้ pytchat เพื่อดึงชื่อวิดีโอและตรวจสอบว่าไลฟ์อยู่ไหม
-            chat = pytchat.create(video_id=video_id)
-            if chat.is_alive():
-                monitors[video_id] = {
-                    "user_id": interaction.user.id,
-                    "prefix": self.prefix.value.upper(),
-                    "title": "กำลังดึงข้อมูล...",
-                    "status": "green",
-                    "log_channel": self.log_channel_id,
-                    "chat_obj": chat
-                }
-                await interaction.response.send_message(f"✅ เริ่มเฝ้าดู Video ID: `{video_id}` เรียบร้อย!", ephemeral=True)
-            else:
-                await interaction.response.send_message("❌ วิดีโอนี้ไม่ใช่ไลฟ์สดที่กำลังฉายอยู่", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ เกิดข้อผิดพลาด: {str(e)}", ephemeral=True)
-
-# ---------- ระบบดึงแชท Real-time (Background Task) ----------
-@tasks.loop(seconds=1) # วนลูปอ่านแชททุกวินาที
-async def check_chat_loop(self):
-    for vid, data in list(monitors.items()):
-        try:
-            chat = data['chat_obj']
-            if chat.is_alive():
-                for c in chat.get().sync_items():
-                    msg = c.message
-                    prefix = data['prefix']
-                    
-                    # ค้นหาโค้ดที่มี Prefix นำหน้า
-                    pattern = rf"{prefix}[A-Z0-9]+"
-                    match = re.search(pattern, msg.upper())
-                    
-                    if match:
-                        code = match.group(0)
-                        if code not in sent_codes:
-                            user = await bot.fetch_user(data['user_id'])
-                            await self.send_code_dm(user, code, data['title'])
-                            sent_codes.add(code)
-                
-                monitors[vid]['status'] = "green"
-            else:
-                # ถ้าไลฟ์จบแล้ว
-                monitors[vid]['status'] = "red"
-        except Exception as e:
-            monitors[vid]['status'] = "red"
-            user = await bot.fetch_user(data['user_id'])
-            await self.send_error_dm(user, str(e))
-
-async def send_code_dm(self, user, code, title):
-    embed = discord.Embed(title="🚀 ตรวจพบโค้ด ROV!", color=0xFFD700, timestamp=datetime.datetime.now())
-    embed.add_field(name="📌 รหัส (แตะเพื่อคัดลอก)", value=f"`{code}`", inline=False)
-    embed.set_footer(text=f"จากไลฟ์: {title}")
-    try: await user.send(embed=embed)
-    except: pass
-
-async def send_error_dm(self, error_msg):
-    embed = discord.Embed(title="⚠️ แจ้งเตือนข้อผิดพลาด (Error)", description=f"```{error_msg}```", color=discord.Color.red())
-    try: await user.send(embed=embed)
-    except: pass
-
 # ---------- คำสั่งติดตั้งหลัก ----------
 @bot.tree.command(name="setup_monitor", description="สร้างระบบเฝ้าดู YouTube Live แบบ Real-time")
 async def setup_monitor(interaction: discord.Interaction, title: str, message: str, image_url: str, channel: discord.TextChannel):
@@ -151,4 +145,10 @@ async def setup_monitor(interaction: discord.Interaction, title: str, message: s
 # ---------- รันบอท ----------
 if __name__ == "__main__":
     keep_alive()
-    bot.run(os.environ.get('TOKEN'))
+    # ตรวจสอบตัวแปรใน Render ว่าชื่อ TOKEN หรือ DISCORD_TOKEN
+    token = os.environ.get('TOKEN') or os.environ.get('DISCORD_TOKEN')
+    if token:
+        bot.run(token)
+    else:
+        print("❌ Error: บอทหา Token ไม่เจอ กรุณาเช็คในหน้า Environment ของ Render")
+                
