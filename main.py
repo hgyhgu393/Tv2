@@ -1,154 +1,225 @@
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
-import os
-import re
-import datetime
+from discord.ext import commands
 import asyncio
-import pytchat
+import datetime
+import os
+import yt_dlp
 from flask import Flask
 from threading import Thread
 
-# ---------- ระบบ Web Server สำหรับ Keep Alive ----------
+# ---------- ตั้งค่าระบบรันบนเว็บไซต์ (Render) ----------
 app = Flask('')
 @app.route('/')
-def home(): return "YouTube Scanner is running."
-def run(): app.run(host='0.0.0.0', port=8080)
-def keep_alive(): Thread(target=run).start()
+def home():
+    return "Bot is running!"
 
-# ---------- ระบบจัดเก็บข้อมูล ----------
-monitors = {}
-sent_codes = set()
+def run():
+    app.run(host='0.0.0.0', port=8080)
 
-class YouTubeLiveBot(commands.Bot):
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# ---------- เริ่มต้นโค้ดบอทของแทน ----------
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.voice_states = True # เพิ่มสิทธิ์สำหรับเข้าห้องเสียง
+
+class MyBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
+        self.antispam_enabled = False
+        self.user_messages = {}
+        self.warn_count = {}
 
     async def setup_hook(self):
         await self.tree.sync()
-        self.check_chat_loop.start() # เริ่มวนลูปที่อยู่ใน Class นี้
-        print(f"✅ บอทออนไลน์แล้วในชื่อ: {self.user}")
+        print(f"✅ Sync Slash Commands และเข้าระบบแล้วในชื่อ {self.user}")
 
-    # ---------- ระบบดึงแชท Real-time (ต้องอยู่ใน Class) ----------
-    @tasks.loop(seconds=1)
-    async def check_chat_loop(self):
-        for vid, data in list(monitors.items()):
-            try:
-                chat = data['chat_obj']
-                if chat.is_alive():
-                    for c in chat.get().sync_items():
-                        msg = c.message
-                        prefix = data['prefix']
-                        
-                        pattern = rf"{prefix}[A-Z0-9]+"
-                        match = re.search(pattern, msg.upper())
-                        
-                        if match:
-                            code = match.group(0)
-                            if code not in sent_codes:
-                                user = await self.fetch_user(data['user_id'])
-                                await self.send_code_dm(user, code, data['title'])
-                                sent_codes.add(code)
-                    monitors[vid]['status'] = "green"
-                else:
-                    monitors[vid]['status'] = "red"
-            except Exception as e:
-                monitors[vid]['status'] = "red"
-                print(f"Error in loop: {e}")
+bot = MyBot()
 
-    async def send_code_dm(self, user, code, title):
-        embed = discord.Embed(title="🚀 ตรวจพบโค้ด ROV!", color=0xFFD700, timestamp=datetime.datetime.now())
-        embed.add_field(name="📌 รหัส (แตะเพื่อคัดลอก)", value=f"`{code}`", inline=False)
-        embed.set_footer(text=f"จากไลฟ์: {title}")
-        try: await user.send(embed=embed)
-        except: pass
+# ตั้งค่าสำหรับเล่นเพลง (ปรับปรุงเพื่อให้หาไฟล์ FFmpeg ที่โหลดมาเจอ)
+YDL_OPTIONS = {'format': 'bestaudio', 'noplaylist': 'True'}
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 
+    'options': '-vn',
+    'executable': './ffmpeg/ffmpeg' # <--- เพิ่มบรรทัดนี้เพื่อให้รันบน Render ได้
+}
 
-    async def send_error_dm(self, user, error_msg):
-        embed = discord.Embed(title="⚠️ แจ้งเตือนข้อผิดพลาด (Error)", description=f"```{error_msg}```", color=discord.Color.red())
-        try: await user.send(embed=embed)
-        except: pass
+# เก็บค่าการตั้งค่าห้องต้อนรับ/ลาออก
+welcome_settings = {}
 
-bot = YouTubeLiveBot()
+# ---------- 7. ระบบเพลง (เพิ่มเข้าไปใหม่) ----------
+@bot.tree.command(name="play", description="เปิดเพลงจาก YouTube")
+@app_commands.describe(url="ใส่ลิงก์เพลงจาก YouTube")
+async def play(interaction: discord.Interaction, url: str):
+    if not interaction.user.voice:
+        return await interaction.response.send_message("❌ คุณต้องเข้าห้องเสียงก่อน!", ephemeral=True)
 
-# ---------- ระบบ UI และปุ่มกด ----------
-class AddLinkModal(discord.ui.Modal, title="เพิ่มลิ้งค์ YouTube Live"):
-    yt_url = discord.ui.TextInput(label="YouTube Live URL", placeholder="วางลิ้งค์ที่นี่...")
-    prefix = discord.ui.TextInput(label="คำนำหน้าโค้ด (เช่น RPL)", placeholder="RPL", min_length=2)
-
-    def __init__(self, log_channel_id):
-        super().__init__()
-        self.log_channel_id = log_channel_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        video_id_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", self.yt_url.value)
-        if not video_id_match:
-            return await interaction.response.send_message("❌ ลิ้งค์ไม่ถูกต้อง", ephemeral=True)
-        
-        video_id = video_id_match.group(1)
-        try:
-            chat = pytchat.create(video_id=video_id)
-            if chat.is_alive():
-                monitors[video_id] = {
-                    "user_id": interaction.user.id,
-                    "prefix": self.prefix.value.upper(),
-                    "title": "YouTube Live Content",
-                    "status": "green",
-                    "log_channel": self.log_channel_id,
-                    "chat_obj": chat
-                }
-                await interaction.response.send_message(f"✅ เริ่มเฝ้าดู Video ID: `{video_id}` เรียบร้อย!", ephemeral=True)
-            else:
-                await interaction.response.send_message("❌ วิดีโอนี้ไม่ใช่ไลฟ์สดที่กำลังฉายอยู่", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ เกิดข้อผิดพลาด: {str(e)}", ephemeral=True)
-
-class ControlPanelView(discord.ui.View):
-    def __init__(self, log_channel_id):
-        super().__init__(timeout=None)
-        self.log_channel_id = log_channel_id
-
-    @discord.ui.button(label="เพิ่มลิ้งค์การดู", style=discord.ButtonStyle.success, emoji="➕")
-    async def add_link(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddLinkModal(self.log_channel_id))
-
-    @discord.ui.button(label="ลบลิ้งค์การดู", style=discord.ButtonStyle.danger, emoji="➖")
-    async def remove_link(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not monitors:
-            return await interaction.response.send_message("❌ ไม่มีลิ้งค์ที่กำลังดูอยู่", ephemeral=True)
-        monitors.clear()
-        await interaction.response.send_message("🗑️ ลบรายการเฝ้าดูทั้งหมดเรียบร้อยแล้ว", ephemeral=True)
-
-    @discord.ui.button(label="สถานะการดูของบอท", style=discord.ButtonStyle.secondary, emoji="📊")
-    async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not monitors:
-            return await interaction.response.send_message("⚪ สถานะ: ว่างงาน", ephemeral=True)
-        
-        embed = discord.Embed(title="📊 สถานะการเฝ้าดูปัจจุบัน", color=discord.Color.blue())
-        for vid, data in monitors.items():
-            emoji = "🟢" if data['status'] == "green" else "🔴"
-            embed.add_field(name=f"{emoji} {data['title']}", value=f"Video ID: `{vid}` | Prefix: `{data['prefix']}`", inline=False)
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ---------- คำสั่งติดตั้งหลัก ----------
-@bot.tree.command(name="setup_monitor", description="สร้างระบบเฝ้าดู YouTube Live แบบ Real-time")
-async def setup_monitor(interaction: discord.Interaction, title: str, message: str, image_url: str, channel: discord.TextChannel):
-    embed = discord.Embed(title=title, description=message, color=discord.Color.blue())
-    if image_url: embed.set_image(url=image_url)
+    await interaction.response.defer() # ป้องกันบอทค้างขณะโหลดเพลง
     
-    view = ControlPanelView(log_channel_id=channel.id)
-    await interaction.response.send_message("✅ ติดตั้ง UI เรียบร้อยแล้ว", ephemeral=True)
-    await interaction.channel.send(embed=embed, view=view)
+    channel = interaction.user.voice.channel
+    vc = interaction.guild.voice_client
 
-# ---------- รันบอท ----------
+    if not vc:
+        vc = await channel.connect()
+    else:
+        await vc.move_to(channel)
+    
+    if vc.is_playing():
+        vc.stop()
+
+    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+        try:
+            info = ydl.extract_info(url, download=False)
+            url2 = info['url']
+            # ใช้ PyNaCl เบื้องหลังในการจัดการ Voice
+            source = await discord.FFmpegOpusAudio.from_probe(url2, **FFMPEG_OPTIONS)
+            vc.play(source)
+            await interaction.followup.send(f"🎶 กำลังเล่นเพลง: **{info['title']}**")
+        except Exception as e:
+            await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {str(e)}")
+
+@bot.tree.command(name="stop", description="หยุดเพลงและออกจากห้องเสียง")
+async def stop(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc:
+        await vc.disconnect()
+        await interaction.response.send_message("👋 หยุดเพลงและออกจากห้องเสียงแล้ว")
+    else:
+        await interaction.response.send_message("❌ บอทไม่ได้อยู่ในห้องเสียง", ephemeral=True)
+
+# ---------- ระบบสแปม (โค้ดเดิมของแทน) ----------
+@bot.tree.command(name="เปิด", description="เปิดระบบป้องกันสแปม")
+async def open_antispam(interaction: discord.Interaction):
+    bot.antispam_enabled = True
+    await interaction.response.send_message("🛡️ **ระบบป้องกันสแปม:** เปิดใช้งานแล้ว! (5 ข้อความรัวๆ / เตือน 3 ครั้ง / Timeout 5 นาที)")
+
+@bot.event
+async def on_message(message):
+    if bot.antispam_enabled and not message.author.bot and message.guild:
+        user_id = message.author.id
+        now = datetime.datetime.now().timestamp()
+        if user_id not in bot.user_messages:
+            bot.user_messages[user_id] = []
+        bot.user_messages[user_id].append(now)
+        bot.user_messages[user_id] = [t for t in bot.user_messages[user_id] if now - t < 5]
+
+        if len(bot.user_messages[user_id]) >= 5:
+            try: await message.delete()
+            except: pass
+            count = bot.warn_count.get(user_id, 0) + 1
+            bot.warn_count[user_id] = count
+            if count >= 3:
+                duration = datetime.timedelta(minutes=5)
+                try:
+                    await message.author.timeout(duration, reason="สแปมข้อความเกินกำหนด")
+                    try: await message.author.send(f"⚠️ คุณถูกระงับการพิมพ์ในเซิร์ฟเวอร์ {message.guild.name} เป็นเวลา 5 นาที เนื่องจากสแปม")
+                    except: pass
+                    bot.warn_count[user_id] = 0
+                    bot.user_messages[user_id] = []
+                except: pass
+            else:
+                warning = await message.channel.send(f"⚠️ {message.author.mention} **หยุดสแปม!** เตือนครั้งที่ {count}/3")
+                await asyncio.sleep(3)
+                await warning.delete()
+    await bot.process_commands(message)
+
+# ---------- 1. ระบบรายงานปัญหา (โค้ดเดิมของแทน) ----------
+class ReportModal(discord.ui.Modal, title="รายงานปัญหาในเซิร์ฟเวอร์"):
+    problem = discord.ui.TextInput(label="พิมพ์ปัญหาของคุณที่นี่", style=discord.TextStyle.long)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        owner = interaction.guild.owner
+        try:
+            await owner.send(f"📢 **มีรายงานใหม่จาก {interaction.user}**\n```{self.problem.value}```")
+            await interaction.followup.send("✅ รายงานสำเร็จ!", ephemeral=True)
+        except:
+            await interaction.followup.send("❌ ส่งไม่สำเร็จ", ephemeral=True)
+
+class ReportButton(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
+    @discord.ui.button(label="📩 รายงานปัญหา", style=discord.ButtonStyle.danger)
+    async def report(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ReportModal())
+
+@bot.tree.command(name="report", description="ตั้ง UI รายงานปัญหาในห้องที่เลือก")
+async def report_command(interaction: discord.Interaction, channel: discord.TextChannel):
+    await channel.send("📣 หากพบปัญหาในเซิร์ฟเวอร์ กดปุ่มด้านล่างเพื่อรายงาน", view=ReportButton())
+    await interaction.response.send_message("✅ ตั้ง UI รายงานปัญหาเรียบร้อย!", ephemeral=True)
+
+# ---------- 2. ระบบยืนยันตัวตน (โค้ดเดิมของแทน) ----------
+class VerifyModal(discord.ui.Modal, title="ยืนยันตัวตน"):
+    name = discord.ui.TextInput(label="กรอกชื่อของคุณ", style=discord.TextStyle.short)
+    def __init__(self, verify_channel, success_channel, role):
+        super().__init__()
+        self.verify_channel, self.success_channel, self.role = verify_channel, success_channel, role
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await self.success_channel.send(f"✅ {interaction.user.mention} ยืนยันตัวตนสำเร็จ! (ชื่อ: {self.name.value})")
+            if self.role: await interaction.user.add_roles(self.role)
+            await interaction.followup.send("🎉 ยืนยันตัวตนเรียบร้อย!", ephemeral=True)
+        except: await interaction.followup.send("❌ บอทไม่มีสิทธิ์ให้ยศ", ephemeral=True)
+
+class VerifyButton(discord.ui.View):
+    def __init__(self, vc, sc, r):
+        super().__init__(timeout=None)
+        self.vc, self.sc, self.r = vc, sc, r
+    @discord.ui.button(label="✅ ยืนยันตัวตน", style=discord.ButtonStyle.success)
+    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VerifyModal(self.vc, self.sc, self.r))
+
+@bot.tree.command(name="verify", description="ตั้งระบบยืนยันตัวตน")
+async def verify_command(interaction: discord.Interaction, verify_channel: discord.TextChannel, success_channel: discord.TextChannel, role: discord.Role):
+    await verify_channel.send("👤 กดยืนยันตัวตนด้านล่างเพื่อเริ่ม", view=VerifyButton(verify_channel, success_channel, role))
+    await interaction.response.send_message("✅ ตั้งระบบยืนยันตัวตนเรียบร้อย!", ephemeral=True)
+
+# ---------- 3, 4, 5, 6 (โค้ดเดิมของแทน) ----------
+@bot.tree.command(name="send_message")
+async def send_message(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
+    await channel.send(message)
+    await interaction.response.send_message("✅ ส่งเรียบร้อย!", ephemeral=True)
+
+@bot.tree.command(name="dm_all")
+async def dm_all(interaction: discord.Interaction, message: str):
+    await interaction.response.send_message("📨 กำลังส่ง...", ephemeral=True)
+    count = 0
+    async for member in interaction.guild.fetch_members(limit=None):
+        if not member.bot:
+            try: await member.send(message); count += 1
+            except: pass
+    await interaction.followup.send(f"✅ ส่งถึง {count} คนแล้ว!", ephemeral=True)
+
+@bot.tree.command(name="dm_one")
+async def dm_one(interaction: discord.Interaction, member: discord.Member, message: str):
+    try: await member.send(message); await interaction.response.send_message("✅ ส่งแล้ว!", ephemeral=True)
+    except: await interaction.response.send_message("❌ ส่งไม่ได้", ephemeral=True)
+
+@bot.tree.command(name="setup_welcome")
+async def setup_welcome(interaction: discord.Interaction, join_channel: discord.TextChannel, leave_channel: discord.TextChannel):
+    welcome_settings[interaction.guild.id] = {"join": join_channel.id, "leave": leave_channel.id}
+    await interaction.response.send_message("✅ ตั้งค่าเรียบร้อย!", ephemeral=True)
+
+@bot.event
+async def on_member_join(member):
+    data = welcome_settings.get(member.guild.id)
+    if data:
+        ch = member.guild.get_channel(data["join"])
+        if ch: await ch.send(f"👋 ยินดีต้อนรับ {member.mention}!")
+
+@bot.event
+async def on_member_remove(member):
+    data = welcome_settings.get(member.guild.id)
+    if data:
+        ch = member.guild.get_channel(data["leave"])
+        if ch: await ch.send(f"😢 {member} ออกไปแล้ว")
+
+# ---------- เริ่มรันระบบ ----------
 if __name__ == "__main__":
     keep_alive()
-    # ตรวจสอบตัวแปรใน Render ว่าชื่อ TOKEN หรือ DISCORD_TOKEN
-    token = os.environ.get('TOKEN') or os.environ.get('DISCORD_TOKEN')
-    if token:
-        bot.run(token)
-    else:
-        print("❌ Error: บอทหา Token ไม่เจอ กรุณาเช็คในหน้า Environment ของ Render")
-                
+    token = os.environ.get('TOKEN')
+    if token: bot.run(token)
+    else: print("❌ ไม่พบ TOKEN!")
